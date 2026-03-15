@@ -1,2 +1,4 @@
-repo/*
-logs/*
+repo/
+logs/
+cron/
+config
