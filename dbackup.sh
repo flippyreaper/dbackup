@@ -856,11 +856,25 @@ cmd_list() {
     if [[ "$IS_INTERACTIVE" == true ]]; then
         draw_header
         draw_section "NAMED VOLUMES"
+        local total_bytes=0
         for vol in "${all_volumes[@]}"; do
-            local size
+            local size path
+            path="$VOLUME_BASE/$vol/_data"
             size=$(get_volume_size "$vol")
             printf "  ${NCYAN}%-30s${NC}  %s\n" "$vol" "$size"
+            if [[ -d "$path" ]]; then
+                local b; b=$(du -sb "$path" 2>/dev/null | cut -f1)
+                total_bytes=$(( total_bytes + ${b:-0} ))
+            fi
         done
+        local total_fmt
+        total_fmt=$(awk -v b="$total_bytes" 'BEGIN{
+            if(b>=1073741824) printf "%.1f GiB", b/1073741824
+            else if(b>=1048576) printf "%.1f MiB", b/1048576
+            else if(b>=1024) printf "%.1f KiB", b/1024
+            else printf "%d B", b }')
+        echo ""
+        gum style --foreground "$GC_DIM" "  total  ${total_fmt}"
         echo ""
         draw_section "BORG REPO"
         if borg info "$BORG_REPO_PATH" &>/dev/null; then
