@@ -79,14 +79,14 @@ sudo apt update && sudo apt install gum
 ⚡  Backup all volumes
 🎯  Backup selected volumes
 🚫  Backup all except...
-♻️   Restore from backup
-🗑️   Delete backups           ← delete borg archives
+📥  Restore from backup
+🗑  Delete backups            ← delete borg archives
 💣  Delete volumes            ← delete Docker volumes
 📋  List volumes
 📦  Repository info           ← grouped by volume, newest first, with sizes
 🔮  Dry run (preview)
 🔄  Migrate bind mount → volume
-🗄️   Change repo path          ← persists to config
+📁  Change repo path          ← persists to config
 🎨  Choose theme
 🚪  Quit
 ```

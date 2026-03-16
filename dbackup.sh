@@ -2117,14 +2117,14 @@ main_menu() {
             "⚡  Backup all volumes" \
             "🎯  Backup selected volumes" \
             "🚫  Backup all except..." \
-            "♻️   Restore from backup" \
-            "🗑️   Delete backups" \
+            "📥  Restore from backup" \
+            "🗑  Delete backups" \
             "💣  Delete volumes" \
             "📋  List volumes" \
             "📦  Repository info" \
             "🔮  Dry run (preview)" \
             "🔄  Migrate bind mount → volume" \
-            "🗄️   Change repo path" \
+            "📁  Change repo path" \
             "🎨  Choose theme" \
             "🚪  Quit") || break
 
