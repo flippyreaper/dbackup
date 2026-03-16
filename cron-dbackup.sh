@@ -29,7 +29,7 @@
 BORG_REPO_PATH="/opt/dbackup/repo"
 VOLUME_BASE="/var/lib/docker/volumes"
 COMPOSE_DIR="/opt/docker"
-LOG_DIR="/opt/docker-backup/logs"
+LOG_DIR="/opt/dbackup/logs"
 RETENTION_DAILY=14
 BORG_COMPRESSION="zstd,3"
 TIMESTAMP_FMT="%F_%H%M%S"
