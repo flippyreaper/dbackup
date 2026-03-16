@@ -50,6 +50,8 @@ RESTORE_TARGET=""
 RESTORE_TO=""
 NOW=$(date +"$TIMESTAMP_FMT")
 
+ACTIVE_THEME="miami"
+
 # Load persistent config (overrides defaults set above)
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
@@ -69,28 +71,89 @@ SKIPPED_DB_IDS=()
 SKIPPED_DB_NAMES=()
 
 # ============================================================
-# NEON COLOR PALETTE (ANSI — for plain output / cron / log)
+# THEMES
 # ============================================================
-NCYAN=$'\033[38;2;0;255;255m'
-NPINK=$'\033[38;2;255;45;120m'
-NGREEN=$'\033[38;2;0;255;159m'
-NPURPLE=$'\033[38;2;191;0;255m'
-NYELLOW=$'\033[38;2;255;230;0m'
-NRED=$'\033[38;2;255;68;68m'
-NGRAY=$'\033[38;2;102;102;102m'
-NC=$'\033[0m'
-NBOLD=$'\033[1m'
 
-# Gum hex colors
-GC_CYAN="#00FFFF"
-GC_PINK="#FF2D78"
-GC_GREEN="#00FF9F"
-GC_PURPLE="#BF00FF"
-GC_YELLOW="#FFE600"
-GC_RED="#FF4444"
-GC_DIM="#666666"
-GC_WHITE="#EEEEEE"
-GC_DARK="#1A1A2E"
+apply_theme() {
+    case "${1:-miami}" in
+        miami)
+            GC_CYAN="#00FFFF"
+            GC_PINK="#FF2D78"
+            GC_GREEN="#00FF9F"
+            GC_PURPLE="#BF00FF"
+            GC_YELLOW="#FFE600"
+            GC_RED="#FF4444"
+            GC_DIM="#666666"
+            GC_WHITE="#EEEEEE"
+            GC_DARK="#1A1A2E"
+            ;;
+        nord)
+            GC_CYAN="#88C0D0"
+            GC_PINK="#B48EAD"
+            GC_GREEN="#A3BE8C"
+            GC_PURPLE="#81A1C1"
+            GC_YELLOW="#EBCB8B"
+            GC_RED="#BF616A"
+            GC_DIM="#4C566A"
+            GC_WHITE="#ECEFF4"
+            GC_DARK="#2E3440"
+            ;;
+        dracula)
+            GC_CYAN="#8BE9FD"
+            GC_PINK="#FF79C6"
+            GC_GREEN="#50FA7B"
+            GC_PURPLE="#BD93F9"
+            GC_YELLOW="#F1FA8C"
+            GC_RED="#FF5555"
+            GC_DIM="#6272A4"
+            GC_WHITE="#F8F8F2"
+            GC_DARK="#282A36"
+            ;;
+        gruvbox)
+            GC_CYAN="#83A598"
+            GC_PINK="#D3869B"
+            GC_GREEN="#B8BB26"
+            GC_PURPLE="#D3869B"
+            GC_YELLOW="#FABD2F"
+            GC_RED="#FB4934"
+            GC_DIM="#928374"
+            GC_WHITE="#EBDBB2"
+            GC_DARK="#1D2021"
+            ;;
+        catppuccin)
+            GC_CYAN="#89DCEB"
+            GC_PINK="#F5C2E7"
+            GC_GREEN="#A6E3A1"
+            GC_PURPLE="#CBA6F7"
+            GC_YELLOW="#F9E2AF"
+            GC_RED="#F38BA8"
+            GC_DIM="#6C7086"
+            GC_WHITE="#CDD6F4"
+            GC_DARK="#1E1E2E"
+            ;;
+        *)
+            apply_theme miami
+            return
+            ;;
+    esac
+    # Sync ANSI palette (used in plain/cron output and summary table)
+    _hex_to_ansi() {
+        local hex="${1#\#}"
+        printf '\033[38;2;%d;%d;%dm' "0x${hex:0:2}" "0x${hex:2:2}" "0x${hex:4:2}"
+    }
+    NCYAN=$(_hex_to_ansi "$GC_CYAN")
+    NPINK=$(_hex_to_ansi "$GC_PINK")
+    NGREEN=$(_hex_to_ansi "$GC_GREEN")
+    NPURPLE=$(_hex_to_ansi "$GC_PURPLE")
+    NYELLOW=$(_hex_to_ansi "$GC_YELLOW")
+    NRED=$(_hex_to_ansi "$GC_RED")
+    NGRAY=$(_hex_to_ansi "$GC_DIM")
+    NC=$'\033[0m'
+    NBOLD=$'\033[1m'
+}
+
+# Apply theme (ACTIVE_THEME may have been loaded from config above)
+apply_theme "$ACTIVE_THEME"
 
 # ============================================================
 # LOGGING
@@ -101,6 +164,7 @@ save_config() {
     cat > "$CONFIG_FILE" <<EOF
 # dbackup persistent config — auto-generated
 BORG_REPO_PATH="$BORG_REPO_PATH"
+ACTIVE_THEME="$ACTIVE_THEME"
 EOF
 }
 
@@ -1968,6 +2032,49 @@ print(s['compressed_size'],s['deduplicated_size'])
     echo -e "$pager_content" | gum pager
 }
 
+menu_choose_theme() {
+    local -A theme_labels=(
+        [miami]="Miami Vice  — neon cyan & hot pink"
+        [nord]="Nord        — arctic blue & aurora"
+        [dracula]="Dracula     — purple & bright pastels"
+        [gruvbox]="Gruvbox     — warm retro earth tones"
+        [catppuccin]="Catppuccin  — pastel mocha"
+    )
+    local -a theme_order=(miami nord dracula gruvbox catppuccin)
+
+    local -a items=()
+    for t in "${theme_order[@]}"; do
+        local marker="  "
+        [[ "$t" == "$ACTIVE_THEME" ]] && marker="✓ "
+        items+=("${marker}${theme_labels[$t]}")
+    done
+
+    local raw
+    raw=$(gum choose \
+        --height 10 \
+        --cursor "  ▸ " \
+        --cursor.foreground "$GC_PINK" \
+        --item.foreground "$GC_WHITE" \
+        --selected.foreground "$GC_CYAN" \
+        --header "$(gum style --foreground "$GC_PURPLE" "  ┄┄  CHOOSE THEME  ┄┄")" \
+        "${items[@]}") || return 0
+
+    local chosen_key=""
+    for t in "${theme_order[@]}"; do
+        if [[ "$raw" == *"${theme_labels[$t]}"* ]]; then
+            chosen_key="$t"
+            break
+        fi
+    done
+    [[ -z "$chosen_key" ]] && return 0
+
+    ACTIVE_THEME="$chosen_key"
+    apply_theme "$ACTIVE_THEME"
+    save_config
+    clear; draw_header
+    gum_ok "Theme set to: $chosen_key"
+}
+
 main_menu() {
     while true; do
         clear
@@ -1992,6 +2099,7 @@ main_menu() {
             "🔮  Dry run (preview)" \
             "🔄  Migrate bind mount → volume" \
             "🗄️   Change repo path" \
+            "🎨  Choose theme" \
             "🚪  Quit") || break
 
         case "$choice" in
@@ -2048,6 +2156,10 @@ main_menu() {
             *"repo path"*)
                 clear; draw_header
                 menu_change_repo
+                ;;
+            *"theme"*)
+                clear; draw_header
+                menu_choose_theme
                 ;;
             *"Quit"*|"") break ;;
         esac
