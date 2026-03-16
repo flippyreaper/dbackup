@@ -2118,7 +2118,7 @@ main_menu() {
             "🎯  Backup selected volumes" \
             "🚫  Backup all except..." \
             "📥  Restore from backup" \
-            "🗑  Delete backups" \
+            "🔥  Delete backups" \
             "💣  Delete volumes" \
             "📋  List volumes" \
             "📦  Repository info" \

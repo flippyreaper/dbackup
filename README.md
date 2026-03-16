@@ -80,7 +80,7 @@ sudo apt update && sudo apt install gum
 🎯  Backup selected volumes
 🚫  Backup all except...
 📥  Restore from backup
-🗑  Delete backups            ← delete borg archives
+🔥  Delete backups            ← delete borg archives
 💣  Delete volumes            ← delete Docker volumes
 📋  List volumes
 📦  Repository info           ← grouped by volume, newest first, with sizes
