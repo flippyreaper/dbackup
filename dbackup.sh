@@ -1469,6 +1469,298 @@ menu_delete_backups() {
     fi
 }
 
+# ── Compose file updater (text-based, preserves comments/formatting) ─────────
+# Usage: _compose_replace_bindmount FILE SERVICE OLD_SRC OLD_DST VOL_NAME
+_compose_replace_bindmount() {
+    local compose_file="$1" service="$2" old_src="$3" old_dst="$4" vol_name="$5"
+
+    [[ ! -f "$compose_file" ]] && return 1
+
+    # Backup
+    cp -f "$compose_file" "${compose_file}.dbackup_bak"
+
+    python3 - "$compose_file" "$old_src" "$old_dst" "$vol_name" <<'PYEOF'
+import sys, re, os
+
+compose_file, old_src, old_dst, vol_name = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+with open(compose_file) as f:
+    content = f.read()
+
+changed = False
+
+# Replace shorthand: "- /src:/dst" or "- /src:/dst:mode"
+pat = r'([ \t]*-[ \t]+)' + re.escape(old_src) + r':' + re.escape(old_dst) + r'(\S*)'
+new_content, n = re.subn(pat, lambda m: m.group(1) + vol_name + ':' + old_dst + m.group(2), content)
+if n > 0:
+    changed = True
+    content = new_content
+
+# Replace long-form: type: bind / source: /src / target: /dst
+# Match the block and replace type+source
+pat_long = (r'([ \t]+-[ \t]*\n(?:[ \t]+[^\n]+\n)*?)'
+            r'([ \t]+type:[ \t]*bind\n)'
+            r'((?:[ \t]+[^\n]+\n)*?)'
+            r'([ \t]+source:[ \t]*)' + re.escape(old_src) + r'(\n)')
+def replace_long(m):
+    return (m.group(1)
+            + re.sub(r'bind', 'volume', m.group(2))
+            + m.group(3)
+            + m.group(4) + vol_name + m.group(5))
+new_content, n = re.subn(pat_long, replace_long, content)
+if n > 0:
+    changed = True
+    content = new_content
+
+if not changed:
+    print(f"WARNING: bind mount {old_src}:{old_dst} not found in compose file", file=sys.stderr)
+    sys.exit(1)
+
+# Ensure top-level volumes section contains vol_name
+vol_entry_pat = re.compile(r'^(\s*)' + re.escape(vol_name) + r'\s*:', re.MULTILINE)
+if not vol_entry_pat.search(content):
+    top_vol_pat = re.compile(r'^(volumes\s*:)', re.MULTILINE)
+    if top_vol_pat.search(content):
+        content = top_vol_pat.sub(r'\1\n  ' + vol_name + ':', content, count=1)
+    else:
+        content = content.rstrip('\n') + '\n\nvolumes:\n  ' + vol_name + ':\n'
+
+with open(compose_file, 'w') as f:
+    f.write(content)
+print("OK")
+PYEOF
+}
+
+menu_migrate_bindmount() {
+    echo ""
+    draw_section "MIGRATE BIND MOUNT → NAMED VOLUME"
+
+    # ── Discover bind mounts ─────────────────────────────────────────────────
+    local -a mount_data=()     # "cid|cname|service|workdir|src|dst"
+    local -a mount_display=()  # shown in gum choose
+
+    while IFS= read -r cid; do
+        [[ -z "$cid" ]] && continue
+        local cname service workdir
+        cname=$(get_container_name "$cid")
+        service=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$cid" 2>/dev/null)
+        workdir=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$cid" 2>/dev/null)
+
+        while IFS='|' read -r src dst; do
+            [[ -z "$src" || -z "$dst" ]] && continue
+            [[ ! -d "$src" ]] && continue   # skip non-directory bind mounts (single files)
+            local src_size; src_size=$(du -sh "$src" 2>/dev/null | cut -f1 || echo "?")
+            mount_data+=("${cid}|${cname}|${service:-$cname}|${workdir}|${src}|${dst}")
+            mount_display+=("$(printf "%-28s  %-36s → %s  (%s)" "$cname" "$src" "$dst" "$src_size")")
+        done < <(docker inspect --format \
+            '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}{{end}}' \
+            "$cid" 2>/dev/null)
+    done < <(docker ps -aq 2>/dev/null)
+
+    if [[ ${#mount_data[@]} -eq 0 ]]; then
+        gum_warn "No directory bind mounts found across all containers"
+        return
+    fi
+
+    # ── Selection ────────────────────────────────────────────────────────────
+    local raw_selected
+    raw_selected=$(gum choose \
+        --no-limit \
+        --height 18 \
+        --cursor "  ▸ " \
+        --cursor.foreground "$GC_PINK" \
+        --item.foreground "$GC_WHITE" \
+        --selected.foreground "$GC_CYAN" \
+        --selected-prefix "  ● " \
+        --unselected-prefix "  ○ " \
+        --header "$(gum style --foreground "$GC_PURPLE" "  Select bind mounts to migrate  (space to toggle):")" \
+        "${mount_display[@]}") || return 0
+
+    [[ -z "$raw_selected" ]] && { gum_warn "Nothing selected"; return; }
+
+    # Map selected display strings back to mount_data entries
+    local -a selected_data=()
+    local i
+    for i in "${!mount_display[@]}"; do
+        if echo "$raw_selected" | grep -qF "${mount_display[$i]}"; then
+            selected_data+=("${mount_data[$i]}")
+        fi
+    done
+    [[ ${#selected_data[@]} -eq 0 ]] && { gum_warn "Nothing selected"; return; }
+
+    # ── Confirm volume names ─────────────────────────────────────────────────
+    echo ""
+    draw_section "CONFIRM VOLUME NAMES"
+    local -a migration_plan=()   # "cid|cname|service|workdir|src|dst|vol_name"
+
+    for entry in "${selected_data[@]}"; do
+        IFS='|' read -r cid cname service workdir src dst <<< "$entry"
+        # Propose a name: project_service or cname_basename
+        local project; project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)
+        local proposed
+        if [[ -n "$project" && -n "$service" ]]; then
+            proposed="${project}_$(basename "$dst" | tr '/' '_')"
+        else
+            proposed="${cname}_$(basename "$dst" | tr '/' '_')"
+        fi
+        proposed=$(echo "$proposed" | tr -cs 'a-zA-Z0-9_-' '_' | sed 's/_$//')
+
+        gum_info "$cname  $src → $dst"
+        local vol_name
+        vol_name=$(gum input \
+            --value "$proposed" \
+            --width 50 \
+            --prompt "$(gum style --foreground "$GC_PINK" "  Volume name: ")" \
+            ) || return 0
+        [[ -z "$vol_name" ]] && vol_name="$proposed"
+
+        # Check volume doesn't already exist
+        if docker volume inspect "$vol_name" &>/dev/null; then
+            gum_warn "Volume '$vol_name' already exists — data will be OVERWRITTEN"
+            gum confirm --affirmative "Continue" --negative "Skip" --default=false \
+                "$(gum style --foreground "$GC_YELLOW" "Overwrite existing volume $vol_name?")" \
+                || continue
+        fi
+
+        migration_plan+=("${cid}|${cname}|${service}|${workdir}|${src}|${dst}|${vol_name}")
+        echo ""
+    done
+
+    [[ ${#migration_plan[@]} -eq 0 ]] && { gum_warn "No migrations to perform"; return; }
+
+    # ── Show plan ────────────────────────────────────────────────────────────
+    draw_section "MIGRATION PLAN"
+    for entry in "${migration_plan[@]}"; do
+        IFS='|' read -r cid cname service workdir src dst vol_name <<< "$entry"
+        printf "     ${NCYAN}%-28s${NC}  %s\n" "$cname" "$src"
+        printf "     ${NGRAY}%-28s  → volume: %s  (mounted at %s)${NC}\n" "" "$vol_name" "$dst"
+        [[ -n "$workdir" ]] && printf "     ${NGRAY}%-28s  compose: %s${NC}\n" "" "$workdir"
+        echo ""
+    done
+
+    gum confirm \
+        --affirmative "Migrate" \
+        --negative "Cancel" \
+        --default=true \
+        "$(gum style --foreground "$GC_PINK" --bold "Migrate ${#migration_plan[@]} bind mount(s) to named volumes?")" || return 0
+
+    # ── Stop affected containers ─────────────────────────────────────────────
+    echo ""
+    local -A _seen_stop
+    local -a cids_to_stop=()
+    for entry in "${migration_plan[@]}"; do
+        IFS='|' read -r cid _ _ _ _ _ _ <<< "$entry"
+        [[ -n "${_seen_stop[$cid]+x}" ]] && continue
+        _seen_stop[$cid]=1
+        local state; state=$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)
+        [[ "$state" == "running" || "$state" == "restarting" ]] && cids_to_stop+=("$cid")
+    done
+
+    if [[ ${#cids_to_stop[@]} -gt 0 ]]; then
+        spin_run "Stopping ${#cids_to_stop[@]} container(s)..." \
+            docker stop --time "$STOP_TIMEOUT" "${cids_to_stop[@]}"
+        gum_ok "Containers stopped"
+    fi
+    echo ""
+
+    # ── Migrate ──────────────────────────────────────────────────────────────
+    draw_section "MIGRATING"
+    local errors=0
+    local -a compose_updates=()   # "workdir|service|src|dst|vol_name" for compose fixup
+
+    for entry in "${migration_plan[@]}"; do
+        IFS='|' read -r cid cname service workdir src dst vol_name <<< "$entry"
+
+        # Create volume
+        docker volume create "$vol_name" >>"$LOG_FILE" 2>&1 || {
+            gum_fail "$vol_name — docker volume create failed"
+            (( errors++ )) || true; continue
+        }
+
+        # Copy data using Alpine container (preserves permissions/ownership)
+        local src_size; src_size=$(du -sh "$src" 2>/dev/null | cut -f1 || echo "?")
+        if spin_run "Copying $src_size from $src → $vol_name" \
+            docker run --rm \
+                -v "${src}:/source:ro" \
+                -v "${vol_name}:/dest" \
+                alpine \
+                sh -c "cp -a /source/. /dest/ && echo done"; then
+            gum_ok "$cname  $src → $vol_name"
+        else
+            gum_fail "$cname  copy failed"
+            (( errors++ )) || true; continue
+        fi
+
+        # Queue compose file update
+        if [[ -n "$workdir" && -d "$workdir" ]]; then
+            compose_updates+=("${workdir}|${service}|${src}|${dst}|${vol_name}")
+        fi
+    done
+
+    # ── Update compose files ─────────────────────────────────────────────────
+    if [[ ${#compose_updates[@]} -gt 0 ]]; then
+        echo ""
+        draw_section "UPDATING COMPOSE FILES"
+        local -A _seen_compose
+        for entry in "${compose_updates[@]}"; do
+            IFS='|' read -r workdir service src dst vol_name <<< "$entry"
+
+            local compose_file=""
+            for f in "$workdir/docker-compose.yml" "$workdir/docker-compose.yaml" \
+                     "$workdir/compose.yml" "$workdir/compose.yaml"; do
+                [[ -f "$f" ]] && compose_file="$f" && break
+            done
+
+            if [[ -z "$compose_file" ]]; then
+                gum_warn "No compose file found in $workdir — update manually"
+                printf "     ${NGRAY}Replace:  %s:%s${NC}\n" "$src" "$dst"
+                printf "     ${NGRAY}With:     %s:%s${NC}\n" "$vol_name" "$dst"
+                printf "     ${NGRAY}Add top-level:  volumes:\\n    %s:${NC}\n" "$vol_name"
+                continue
+            fi
+
+            if _compose_replace_bindmount "$compose_file" "$service" "$src" "$dst" "$vol_name" \
+                >>"$LOG_FILE" 2>&1; then
+                gum_ok "Updated $compose_file"
+                gum_info "  backup: ${compose_file}.dbackup_bak"
+            else
+                gum_warn "Auto-update failed — edit manually:"
+                printf "     ${NGRAY}File:     %s${NC}\n" "$compose_file"
+                printf "     ${NGRAY}Replace:  %s:%s${NC}\n" "$src" "$dst"
+                printf "     ${NGRAY}With:     %s:%s${NC}\n" "$vol_name" "$dst"
+                printf "     ${NGRAY}Add top-level volumes:\\n    %s:${NC}\n" "$vol_name"
+            fi
+            echo ""
+        done
+    fi
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    echo ""
+    if [[ $errors -eq 0 ]]; then
+        gum_ok "All ${#migration_plan[@]} bind mount(s) migrated"
+    else
+        gum_warn "$errors migration(s) failed"
+    fi
+
+    # Offer to restart
+    if [[ ${#cids_to_stop[@]} -gt 0 ]]; then
+        echo ""
+        if gum confirm \
+            --affirmative "Restart containers" \
+            --negative "Leave stopped" \
+            --default=true \
+            "$(gum style --foreground "$GC_CYAN" "Restart the stopped containers now?")"; then
+            _reset_started_compose
+            for cid in "${cids_to_stop[@]}"; do
+                local cname; cname=$(get_container_name "$cid")
+                start_container "$cid" && gum_ok "Started: $cname" || gum_warn "Failed: $cname"
+            done
+        else
+            gum_info "Run 'docker compose up -d' in the compose directory after reviewing changes"
+        fi
+    fi
+}
+
 menu_delete_volumes() {
     echo ""
     draw_section "DELETE DOCKER VOLUMES"
@@ -1698,6 +1990,7 @@ main_menu() {
             "📋  List volumes" \
             "📦  Repository info" \
             "🔮  Dry run (preview)" \
+            "🔄  Migrate bind mount → volume" \
             "🗄️   Change repo path" \
             "🚪  Quit") || break
 
@@ -1731,6 +2024,12 @@ main_menu() {
             *"Delete volumes"*)
                 clear; draw_header
                 menu_delete_volumes
+                echo ""
+                gum confirm --affirmative "Back to menu" --negative "Exit" "Return to main menu?" && continue || break
+                ;;
+            *"Migrate"*)
+                clear; draw_header
+                menu_migrate_bindmount
                 echo ""
                 gum confirm --affirmative "Back to menu" --negative "Exit" "Return to main menu?" && continue || break
                 ;;
