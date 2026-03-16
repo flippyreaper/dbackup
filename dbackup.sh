@@ -1788,9 +1788,14 @@ menu_migrate_bindmount() {
             IFS='|' read -r workdir service src dst vol_name <<< "$entry"
 
             local compose_file=""
-            for f in "$workdir/docker-compose.yml" "$workdir/docker-compose.yaml" \
+            # First try the exact path stored in the container label
+            local label_cfg; label_cfg=$(docker inspect --format \
+                '{{index .Config.Labels "com.docker.compose.project.config_files"}}' \
+                "$(docker ps -aqf "label=com.docker.compose.project.working_dir=$workdir" | head -1)" 2>/dev/null)
+            for f in "$label_cfg" \
+                     "$workdir/docker-compose.yml" "$workdir/docker-compose.yaml" \
                      "$workdir/compose.yml" "$workdir/compose.yaml"; do
-                [[ -f "$f" ]] && compose_file="$f" && break
+                [[ -n "$f" && -f "$f" ]] && compose_file="$f" && break
             done
 
             if [[ -z "$compose_file" ]]; then
