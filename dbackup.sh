@@ -1553,35 +1553,53 @@ with open(compose_file) as f:
 
 changed = False
 
-# Replace shorthand: "- /src:/dst" or "- /src:/dst:mode"
-pat = r'([ \t]*-[ \t]+)' + re.escape(old_src) + r':' + re.escape(old_dst) + r'(\S*)'
-new_content, n = re.subn(pat, lambda m: m.group(1) + vol_name + ':' + old_dst + m.group(2), content)
-if n > 0:
-    changed = True
-    content = new_content
+# Build list of source forms to try: absolute + relative variants
+compose_dir = os.path.dirname(os.path.abspath(compose_file))
+src_forms = [old_src]
+try:
+    rel = os.path.relpath(old_src, compose_dir)   # e.g. "config"
+    src_forms.append(rel)
+    src_forms.append('./' + rel)                   # e.g. "./config"
+except ValueError:
+    pass
 
-# Replace long-form: type: bind / source: /src / target: /dst
-# Match the block and replace type+source
-pat_long = (r'([ \t]+-[ \t]*\n(?:[ \t]+[^\n]+\n)*?)'
-            r'([ \t]+type:[ \t]*bind\n)'
-            r'((?:[ \t]+[^\n]+\n)*?)'
-            r'([ \t]+source:[ \t]*)' + re.escape(old_src) + r'(\n)')
-def replace_long(m):
-    return (m.group(1)
-            + re.sub(r'bind', 'volume', m.group(2))
-            + m.group(3)
-            + m.group(4) + vol_name + m.group(5))
-new_content, n = re.subn(pat_long, replace_long, content)
-if n > 0:
-    changed = True
-    content = new_content
+# Replace shorthand: "- <src>:<dst>" or "- <src>:<dst>:mode"
+for src in src_forms:
+    pat = r'([ \t]*-[ \t]+)' + re.escape(src) + r':' + re.escape(old_dst) + r'(\S*)'
+    new_content, n = re.subn(pat, lambda m: m.group(1) + vol_name + ':' + old_dst + m.group(2), content)
+    if n > 0:
+        changed = True
+        content = new_content
+        break
+
+# Replace long-form: type: bind / source: <src> / target: <dst>
+if not changed:
+    for src in src_forms:
+        pat_long = (r'([ \t]+-[ \t]*\n(?:[ \t]+[^\n]+\n)*?)'
+                    r'([ \t]+type:[ \t]*bind\n)'
+                    r'((?:[ \t]+[^\n]+\n)*?)'
+                    r'([ \t]+source:[ \t]*)' + re.escape(src) + r'(\n)')
+        def replace_long(m):
+            return (m.group(1)
+                    + re.sub(r'bind', 'volume', m.group(2))
+                    + m.group(3)
+                    + m.group(4) + vol_name + m.group(5))
+        new_content, n = re.subn(pat_long, replace_long, content)
+        if n > 0:
+            changed = True
+            content = new_content
+            break
 
 if not changed:
     print(f"WARNING: bind mount {old_src}:{old_dst} not found in compose file", file=sys.stderr)
     sys.exit(1)
 
+# Remove commented-out volumes block that matches vol_name (e.g. "#volumes:\n#  config:")
+# so we can add a clean one below
+content = re.sub(r'\n#\s*volumes\s*:(?:\n#[^\n]*)?\n#\s*' + re.escape(vol_name.split('_', 1)[-1] if '_' in vol_name else vol_name) + r'\s*:[^\n]*', '', content)
+
 # Ensure top-level volumes section contains vol_name
-vol_entry_pat = re.compile(r'^(\s*)' + re.escape(vol_name) + r'\s*:', re.MULTILINE)
+vol_entry_pat = re.compile(r'^[ \t]*' + re.escape(vol_name) + r'[ \t]*:', re.MULTILINE)
 if not vol_entry_pat.search(content):
     top_vol_pat = re.compile(r'^(volumes\s*:)', re.MULTILINE)
     if top_vol_pat.search(content):
