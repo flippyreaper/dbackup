@@ -1805,7 +1805,13 @@ menu_migrate_bindmount() {
                 gum_warn "No compose file found in $workdir — update manually"
                 printf "     ${NGRAY}Replace:  %s:%s${NC}\n" "$src" "$dst"
                 printf "     ${NGRAY}With:     %s:%s${NC}\n" "$vol_name" "$dst"
-                printf "     ${NGRAY}Add top-level:  volumes:\\n    %s:${NC}\n" "$vol_name"
+                printf "     ${NGRAY}Add top-level:  volumes:\\n    %s:\\n      external: true${NC}\n" "$vol_name"
+                continue
+            fi
+
+            # Skip if the compose file already references the named volume
+            if grep -qF "${vol_name}:" "$compose_file" 2>/dev/null; then
+                gum_ok "Already up to date: $compose_file"
                 continue
             fi
 
