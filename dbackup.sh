@@ -871,6 +871,10 @@ cmd_list() {
             gum_warn "Repository not initialized yet"
         fi
         echo ""
+        gum confirm \
+            --affirmative "Back to menu" --negative "" \
+            --selected.background "$GC_DARK" --selected.foreground "$GC_CYAN" \
+            " " 2>/dev/null || true
     else
         log_info "Named volumes:"
         for vol in "${all_volumes[@]}"; do
