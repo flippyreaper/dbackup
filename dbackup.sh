@@ -1598,14 +1598,17 @@ if not changed:
 # so we can add a clean one below
 content = re.sub(r'\n#\s*volumes\s*:(?:\n#[^\n]*)?\n#\s*' + re.escape(vol_name.split('_', 1)[-1] if '_' in vol_name else vol_name) + r'\s*:[^\n]*', '', content)
 
-# Ensure top-level volumes section contains vol_name
+# Ensure top-level volumes section contains vol_name declared as external.
+# Using external: true + name: means compose uses the volume as-is (no project
+# prefix), won't delete it on `down -v`, and won't emit ownership warnings.
 vol_entry_pat = re.compile(r'^[ \t]*' + re.escape(vol_name) + r'[ \t]*:', re.MULTILINE)
+ext_block = f'  {vol_name}:\n    external: true'
 if not vol_entry_pat.search(content):
     top_vol_pat = re.compile(r'^(volumes\s*:)', re.MULTILINE)
     if top_vol_pat.search(content):
-        content = top_vol_pat.sub(r'\1\n  ' + vol_name + ':', content, count=1)
+        content = top_vol_pat.sub(r'\1\n' + ext_block, content, count=1)
     else:
-        content = content.rstrip('\n') + '\n\nvolumes:\n  ' + vol_name + ':\n'
+        content = content.rstrip('\n') + '\n\nvolumes:\n' + ext_block + '\n'
 
 with open(compose_file, 'w') as f:
     f.write(content)
