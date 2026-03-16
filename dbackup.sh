@@ -1469,6 +1469,103 @@ menu_delete_backups() {
     fi
 }
 
+menu_delete_volumes() {
+    echo ""
+    draw_section "DELETE DOCKER VOLUMES"
+
+    # Get all named volumes with size
+    local -a all_volumes=()
+    while IFS= read -r vol; do
+        [[ -z "$vol" ]] && continue
+        local size; size=$(get_volume_size "$vol")
+        all_volumes+=("$vol  ($size)")
+    done < <(docker volume ls --format '{{.Name}}' | grep -vE '^[0-9a-f]{64}$' | sort)
+
+    [[ ${#all_volumes[@]} -eq 0 ]] && { gum_warn "No named volumes found"; return; }
+
+    echo ""
+    local raw_selected
+    raw_selected=$(gum choose \
+        --no-limit \
+        --height 18 \
+        --cursor "  ▸ " \
+        --cursor.foreground "$GC_PINK" \
+        --item.foreground "$GC_WHITE" \
+        --selected.foreground "$GC_RED" \
+        --selected-prefix "  ● " \
+        --unselected-prefix "  ○ " \
+        --header "$(gum style --foreground "$GC_RED" --bold "  ⚠  Select volumes to DELETE  (space to toggle):")" \
+        "${all_volumes[@]}") || return 0
+
+    [[ -z "$raw_selected" ]] && { gum_warn "Nothing selected"; return; }
+
+    # Strip size suffix to get plain volume names
+    local -a selected_vols=()
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        selected_vols+=("$(echo "$line" | sed 's/  ([^)]*)$//')")
+    done <<< "$raw_selected"
+
+    # Show what will be deleted and which containers use each volume
+    echo ""
+    draw_section "VOLUMES TO DELETE"
+    local -a all_affected_cids=()
+    for vol in "${selected_vols[@]}"; do
+        local size; size=$(get_volume_size "$vol")
+        printf "     ${NRED}%-36s  %s${NC}\n" "$vol" "$size"
+        # Show containers using this volume
+        while IFS= read -r cid; do
+            [[ -z "$cid" ]] && continue
+            local cname; cname=$(get_container_name "$cid")
+            local state; state=$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)
+            printf "       ${NGRAY}└─ %s  (%s)${NC}\n" "$cname" "$state"
+            all_affected_cids+=("$cid")
+        done < <(docker ps -aq --filter "volume=$vol" 2>/dev/null)
+    done
+    echo ""
+
+    # Stop running containers that use these volumes
+    local -a running_cids=()
+    for cid in "${all_affected_cids[@]}"; do
+        local state; state=$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)
+        [[ "$state" == "running" || "$state" == "restarting" ]] && running_cids+=("$cid")
+    done
+
+    if [[ ${#running_cids[@]} -gt 0 ]]; then
+        gum_warn "${#running_cids[@]} container(s) must be stopped before volume deletion"
+        gum confirm \
+            --affirmative "Stop & delete" \
+            --negative "Cancel" \
+            --default=false \
+            "$(gum style --foreground "$GC_RED" --bold "⚠  Stop containers and permanently delete ${#selected_vols[@]} volume(s)?")" || return 0
+        echo ""
+        spin_run "Stopping containers..." docker stop --time "$STOP_TIMEOUT" "${running_cids[@]}"
+    else
+        gum confirm \
+            --affirmative "Delete" \
+            --negative "Cancel" \
+            --default=false \
+            "$(gum style --foreground "$GC_RED" --bold "⚠  Permanently delete ${#selected_vols[@]} volume(s)? This cannot be undone.")" || return 0
+    fi
+
+    echo ""
+    local errors=0
+    for vol in "${selected_vols[@]}"; do
+        if docker volume rm "$vol" >>"$LOG_FILE" 2>&1; then
+            gum_ok "Deleted volume: $vol"
+        else
+            gum_fail "Failed to delete: $vol"
+            (( errors++ )) || true
+        fi
+    done
+    echo ""
+    if [[ $errors -eq 0 ]]; then
+        gum_ok "Deleted ${#selected_vols[@]} volume(s)"
+    else
+        gum_warn "$errors volume(s) could not be deleted (may still have containers attached)"
+    fi
+}
+
 _human_size() {
     local bytes="$1"
     if   (( bytes >= 1073741824 )); then awk "BEGIN{printf \"%.1f GB\", $bytes/1073741824}"
@@ -1597,6 +1694,7 @@ main_menu() {
             "🚫  Backup all except..." \
             "♻️   Restore from backup" \
             "🗑️   Delete backups" \
+            "💣  Delete volumes" \
             "📋  List volumes" \
             "📦  Repository info" \
             "🔮  Dry run (preview)" \
@@ -1624,9 +1722,15 @@ main_menu() {
                 echo ""
                 gum confirm --affirmative "Back to menu" --negative "Exit" "Return to main menu?" && continue || break
                 ;;
-            *"Delete"*)
+            *"Delete backups"*)
                 clear; draw_header
                 menu_delete_backups
+                echo ""
+                gum confirm --affirmative "Back to menu" --negative "Exit" "Return to main menu?" && continue || break
+                ;;
+            *"Delete volumes"*)
+                clear; draw_header
+                menu_delete_volumes
                 echo ""
                 gum confirm --affirmative "Back to menu" --negative "Exit" "Return to main menu?" && continue || break
                 ;;
