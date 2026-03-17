@@ -789,6 +789,11 @@ print_summary() {
                 "$(gum style --bold --foreground "$GC_RED" "✗  Backup finished with $ERRORS error(s)  —  ${total_fmt}")"
         fi
         echo ""
+        gum choose \
+            --cursor="" \
+            --cursor.foreground "$GC_CYAN" \
+            --item.foreground "$GC_CYAN" \
+            "↩  Back to menu" >/dev/null
     else
         echo ""
         log_info "=== BACKUP SUMMARY ($(format_duration "$total_elapsed")) ==="
