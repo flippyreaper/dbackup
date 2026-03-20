@@ -287,38 +287,52 @@ stop_all_containers() {
     SKIPPED_DB_IDS=()
     SKIPPED_DB_NAMES=()
 
-    # Scan ALL containers (running + stopped) for each volume
+    local -A compose_projects
+
+    # Pass 1: containers directly using each named volume; collect their compose projects
     for vol in "${volumes_to_backup[@]}"; do
         while IFS= read -r cid; do
             [[ -z "$cid" ]] && continue
-            [[ -n "${seen_cid[$cid]+x}" ]] && continue
             seen_cid[$cid]=1
-
-            local cname cimage state
-            cname=$(get_container_name "$cid")
-            cimage=$(get_container_image "$cid")
-            state=$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)
-
-            if [[ "$state" == "running" || "$state" == "restarting" ]]; then
-                # Running → needs to be stopped before backup, restarted after
-                if is_db_container "$cid"; then
-                    STOPPED_DB_IDS+=("$cid")
-                    STOPPED_DB_NAMES+=("$cname")
-                else
-                    STOPPED_CONTAINER_IDS+=("$cid")
-                    STOPPED_CONTAINER_NAMES+=("$cname")
-                fi
-            else
-                # Already stopped → volume backed up safely, leave untouched after
-                if is_db_container "$cid"; then
-                    SKIPPED_DB_IDS+=("$cid")
-                    SKIPPED_DB_NAMES+=("$cname")
-                else
-                    SKIPPED_CONTAINER_IDS+=("$cid")
-                    SKIPPED_CONTAINER_NAMES+=("$cname")
-                fi
-            fi
+            local proj
+            proj=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)
+            [[ -n "$proj" ]] && compose_projects[$proj]=1
         done < <(get_all_containers_using_volume "$vol")
+    done
+
+    # Pass 2: expand to ALL containers in those compose projects (catches bind-mount-only siblings)
+    for proj in "${!compose_projects[@]}"; do
+        while IFS= read -r cid; do
+            [[ -z "$cid" ]] && continue
+            seen_cid[$cid]=1
+        done < <(docker ps -aq --filter "label=com.docker.compose.project=$proj" 2>/dev/null)
+    done
+
+    # Classify all discovered containers
+    for cid in "${!seen_cid[@]}"; do
+        local cname state
+        cname=$(get_container_name "$cid")
+        state=$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)
+
+        if [[ "$state" == "running" || "$state" == "restarting" ]]; then
+            # Running → needs to be stopped before backup, restarted after
+            if is_db_container "$cid"; then
+                STOPPED_DB_IDS+=("$cid")
+                STOPPED_DB_NAMES+=("$cname")
+            else
+                STOPPED_CONTAINER_IDS+=("$cid")
+                STOPPED_CONTAINER_NAMES+=("$cname")
+            fi
+        else
+            # Already stopped → volume backed up safely, leave untouched after
+            if is_db_container "$cid"; then
+                SKIPPED_DB_IDS+=("$cid")
+                SKIPPED_DB_NAMES+=("$cname")
+            else
+                SKIPPED_CONTAINER_IDS+=("$cid")
+                SKIPPED_CONTAINER_NAMES+=("$cname")
+            fi
+        fi
     done
 
     local n_running=$(( ${#STOPPED_CONTAINER_IDS[@]} + ${#STOPPED_DB_IDS[@]} ))
